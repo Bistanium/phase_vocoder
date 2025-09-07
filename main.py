@@ -1,23 +1,38 @@
+from fractions import Fraction
 from pathlib import Path
 import sys
 import tkinter
 import tkinter.filedialog
-import math
-from fractions import Fraction
 
-import numpy as np
-import scipy
-import resampy
-import soundfile as sf
 from numba import njit
+import numpy as np
+import resampy
+import scipy
+import soundfile as sf
 from tqdm import tqdm
 
 
 class Settings:
-    # on:1 off:0
+    # When enabled, it performs pitch shifting instead of time stretching.
+    # enabled:1  disabled:0
     resampling = 0
-    # 0埋め倍数 2or4
+    # 0埋め倍数  recommended 2 or 4
     pad_multiple = 2
+
+
+# スペクトログラム -> 振幅, 位相
+def analyse_complex_spectrogram(spectrogram):
+    magnitude_spectrogram = np.abs(spectrogram)
+    phase_spectrogram = np.angle(spectrogram)
+
+    return magnitude_spectrogram, phase_spectrogram
+
+
+# 振幅, 位相 -> スペクトログラム
+def reconstruct_spectrogram(magnitude_spectrogram, phase_spectrogram):
+    spectrogram = magnitude_spectrogram * np.exp(1j * phase_spectrogram)
+
+    return spectrogram
 
 
 @njit(cache=True)
@@ -26,25 +41,10 @@ def WrapToPi(phases):
     return (phases + PI) % (2 * PI) - PI
 
 
-# スペクトログラム -> 振幅, 位相
-def AnalyseComplexSpectrogram(spectrogram):
-    magnitude_spectrogram = np.abs(spectrogram)
-    phase_spectrogram = np.angle(spectrogram)
-
-    return magnitude_spectrogram, phase_spectrogram
-
-
-# 振幅, 位相 -> スペクトログラム
-def ReconstructSpectrogram(magnitude_spectrogram, phase_spectrogram):
-    spectrogram = magnitude_spectrogram * np.exp(1j * phase_spectrogram)
-
-    return spectrogram
-
-
 @njit(cache=True)
-def DivideIntoRegions(data, n_min, n_max):
+def divide_into_regions(data, n_min, n_max):
     frameSize = len(data)
-    peakIndices = detect_peaks_linear_n(data, n_min, n_max)
+    peakIndices = detect_peaks(data, n_min, n_max)
     numPeaks = len(peakIndices)
 
     if numPeaks == 0:
@@ -76,9 +76,8 @@ def DivideIntoRegions(data, n_min, n_max):
     return regions, peakIndices
 
 
-# 可変比較点数, parallel=True はnumbaのループ
 @njit(cache=True)
-def detect_peaks_linear_n(data, n_min=2, n_max=10):
+def detect_peaks(data, n_min=2, n_max=10):
     length = len(data)
     n_array = np.linspace(n_min, n_max, length).astype(np.int64)
 
@@ -109,36 +108,18 @@ def detect_peaks_linear_n(data, n_min=2, n_max=10):
     return peaks[:count]
 
 
-def detect_transients(magnitude_prev, magnitude, threshold=0.2):
-    n_bins = len(magnitude)  # 周波数ビン数
-    # 線形重みを作成（低域: 0 → 高域: 1）
-    weights = np.linspace(0, 1, n_bins)
-
-    # 差分を計算（スペクトル差分）
-    diff = magnitude - magnitude_prev
-    positive_diff = np.maximum(diff, 0)
-
-    # 重み適用
-    weighted_diff = positive_diff * weights
-
-    # RMS計算
-    flux = np.sqrt(np.mean(np.square(weighted_diff)))
-
-    # しきい値を使ってトランジェントを検出
-    trunjent = flux > threshold
-
-    return trunjent
-
-
+@njit(cache=True)
 def pair_by_closest(A, B, length, n_min=2, n_max=32):
     i = len(A) - 1
     length_B = len(B)
-    result_A = np.empty(length_B, dtype=np.int64)  # B の長さで固定配列を作る
+    result_A = np.empty(length_B, dtype=np.int64)
     result_B = np.empty(length_B, dtype=np.int64)
-    idx = length_B - 1  # result に書き込むインデックス（逆順で埋める）
+    idx = length_B - 1
     t_array = np.linspace(n_min, n_max, length).astype(np.int64)
 
-    for peak in reversed(B):
+    for b_idx in range(length_B - 1, -1, -1):
+        peak = B[b_idx]
+
         while i - 1 >= 0 and abs(A[i - 1] - peak) <= abs(A[i] - peak):
             i -= 1
 
@@ -157,13 +138,14 @@ def pair_by_closest(A, B, length, n_min=2, n_max=32):
 
 
 @njit(cache=True)
-def _pvm(regions, peak_indices, phase_spectrogram, new_phase_spectrogram, synthesis_phase, beta):
+def _epn(regions, peak_indices, phase_spectrogram, new_phase_spectrogram, synthesis_phase, beta):
     len_peak_indices = len(peak_indices)
     for j in range(len_peak_indices):
         peak = peak_indices[j]
+        # ピークの占める領域
         region = regions[j]
-        phase_current_peak = phase_spectrogram[peak]
-        # synthesis_phaseはピークのときのみしか値がないため
+        phase_spectrogram_peak = phase_spectrogram[peak]
+        # synthesis_phaseはピークのときのみの値しかないため
         synthesis_phase_peak = synthesis_phase[j]
 
         # 領域内の全周波数ビンに対してピーク位相を使って位相補正
@@ -171,17 +153,37 @@ def _pvm(regions, peak_indices, phase_spectrogram, new_phase_spectrogram, synthe
         end_idx = region[1]
         for k in range(start_idx, end_idx):
             # 元のフレームの位相のピークとの差
-            delta = WrapToPi(phase_spectrogram[k] - phase_current_peak)
+            delta = WrapToPi(phase_spectrogram[k] - phase_spectrogram_peak)
             new_phase = synthesis_phase_peak + beta * delta
-            # irfftで共役鏡像は作られる
+            # irfftに共役鏡像を作らせる
             new_phase_spectrogram[k] = new_phase
 
     return new_phase_spectrogram
 
 
-def phase_vocoder(prev_spectrogram, spectrogram, analysis_hop, synthesis_hop, prev_new_phase_spectrogram, before_peak_indices, alpha):
-    prev_magnitude_spectrogram, prev_phase_spectrogram = AnalyseComplexSpectrogram(prev_spectrogram)
-    magnitude_spectrogram, phase_spectrogram = AnalyseComplexSpectrogram(spectrogram)
+def detect_transients(magnitude_prev, magnitude, threshold=0.2):
+    n_bins = len(magnitude)  # 周波数ビン数
+    # 線形重みを作成（低域: 0 → 高域: 1）
+    weights = np.linspace(0, 1, n_bins)
+
+    # 負の増加を除いた差分を計算
+    diff = magnitude - magnitude_prev
+    positive_diff = np.maximum(diff, 0)
+
+    weighted_diff = positive_diff * weights
+
+    # RMS計算
+    flux = np.sqrt(np.mean(np.square(weighted_diff)))
+
+    # しきい値を使ってトランジェントを検出
+    trunjent = flux > threshold
+
+    return trunjent
+
+
+def edit_phase(prev_spectrogram, spectrogram, a_step, s_step, prev_new_phase_spectrogram, before_peak_indices, i):
+    prev_magnitude_spectrogram, prev_phase_spectrogram = analyse_complex_spectrogram(prev_spectrogram)
+    magnitude_spectrogram, phase_spectrogram = analyse_complex_spectrogram(spectrogram)
 
     is_trunjent = detect_transients(prev_magnitude_spectrogram, magnitude_spectrogram)
 
@@ -194,11 +196,15 @@ def phase_vocoder(prev_spectrogram, spectrogram, analysis_hop, synthesis_hop, pr
         n_min, n_max = 2, 32
     else:
         n_min, n_max = 2, 8
-    regions, peak_indices = DivideIntoRegions(magnitude_spectrogram, n_min, n_max)
+    regions, peak_indices = divide_into_regions(magnitude_spectrogram, n_min, n_max)
 
     # 前のピークが移動したとき、周波数的に近ければ同じピークとみなす。
     t_min, t_max = 2, 32
     before_peak_bin, peak_bin = pair_by_closest(before_peak_indices, peak_indices, half_frame_size, t_min, t_max)
+
+    # フレーム間の間隔の計算
+    analysis_hop = int(a_step * i + 0.5) - int(a_step * (i - 1) + 0.5)
+    synthesis_hop = int(s_step * i + 0.5) - int(s_step * (i - 1) + 0.5)
 
     # 各周波数ビンに対応する角周波数
     omega = 2 * np.pi * peak_bin / frame_size
@@ -213,12 +219,13 @@ def phase_vocoder(prev_spectrogram, spectrogram, analysis_hop, synthesis_hop, pr
     new_phase_spectrogram = np.empty(half_frame_size, dtype=np.float64)
 
     # betaは(alpha+2)/3 が良いとか
+    alpha = s_step / a_step
     beta = (alpha + 2) / 3
 
-    # phase vocoder main
-    new_phase_spectrogram = _pvm(regions, peak_indices, phase_spectrogram, new_phase_spectrogram, synthesis_phase, beta)
+    # ループ部分をnumbaで高速化
+    new_phase_spectrogram = _epn(regions, peak_indices, phase_spectrogram, new_phase_spectrogram, synthesis_phase, beta)
 
-    new_spectrogram = ReconstructSpectrogram(magnitude_spectrogram, new_phase_spectrogram)
+    new_spectrogram = reconstruct_spectrogram(magnitude_spectrogram, new_phase_spectrogram)
 
     return new_spectrogram, new_phase_spectrogram, peak_indices
 
@@ -242,13 +249,221 @@ def choose_file():
     return input_path_obj
 
 
+def audio_to_segment(data_l, data_r, win_size, a_step, i):
+    len_data = len(data_l)
+    win_func = scipy.signal.windows.hann(win_size, sym=False)
+
+    pad_size = win_size * (Settings.pad_multiple - 1)
+    """
+    center の値表
+    xxXyy000000 : 0
+    000000xxXyy : win_size
+    000xxXyy000 : -pad_size // 2
+    Xyy000000xx : win_size // 2
+    """
+    center = win_size // 2
+    start = int(a_step * i + 0.5)
+    end = start + win_size
+    if end < len_data:
+        win_data = data_l[start:end] * win_func
+        pad_win_data = np.pad(win_data, (0, pad_size), mode='constant', constant_values=0)
+        ret_ls = np.roll(pad_win_data, -center)
+    else:
+        rest_size = win_size - len(data_l[start:])
+        padded_l = np.pad(data_l[start:], (0, rest_size), mode='constant', constant_values=0)
+        win_data = padded_l * win_func
+        pad_win_data = np.pad(win_data, (0, pad_size), mode='constant', constant_values=0)
+        ret_ls = np.roll(pad_win_data, -center)
+
+    if data_r is not None:
+        if end < len_data:
+            win_data = data_r[start:end] * win_func
+            pad_win_data = np.pad(win_data, (0, pad_size), mode='constant', constant_values=0)
+            ret_rs = np.roll(pad_win_data, -center)
+        else:
+            rest_size = win_size - len(data_r[start:])
+            padded_r = np.pad(data_r[start:], (0, rest_size), mode='constant', constant_values=0)
+            win_data = padded_r * win_func
+            pad_win_data = np.pad(win_data, (0, pad_size), mode='constant', constant_values=0)
+            ret_rs = np.roll(pad_win_data, -center)
+    else:
+        ret_rs = None
+
+    return ret_ls, ret_rs
+
+
+def segment_to_audio(data_ls, data_rs, win_size, s_step, ret_l, ret_r, wsum, i):
+    win_func = scipy.signal.windows.hann(win_size, sym=False)
+
+    center = win_size // 2
+    start = int(s_step * i + 0.5)
+    end = start + win_size
+    ret_l[start:end] += np.roll(data_ls, center)[:win_size] * win_func
+    if data_rs is not None:
+        ret_r[start:end] += np.roll(data_rs, center)[:win_size] * win_func
+    else:
+        ret_r = None
+    wsum[start:end] += win_func ** 2
+
+    return ret_l, ret_r, wsum
+
+
+def normalize(ret_l, ret_r, wsum):
+    epsilon = 1e-8
+    pos = wsum > epsilon
+    ret_l[pos] /= wsum[pos]
+    if ret_r is not None:
+        ret_r[pos] /= wsum[pos]
+
+    return ret_l, ret_r
+
+
+# リサンプリング
+def resampling(left_audio, right_audio, sr, rate):
+    original_sr = int(sr * 1e2 + 0.5)
+    target_sr = int(sr * rate * 1e2 + 0.5)
+    # 最大公約数で割っておいたほうが速いらしい
+    r = Fraction(original_sr, target_sr).limit_denominator()
+    sr_orig = r.numerator
+    sr_new = r.denominator
+
+    resampled_left_audio = resampy.resample(left_audio, sr_orig=sr_orig, sr_new=sr_new, filter='sinc_window', num_zeros=32)
+    if right_audio is not None:
+        resampled_right_audio = resampy.resample(right_audio, sr_orig=sr_orig, sr_new=sr_new, filter='sinc_window', num_zeros=32)
+    else:
+        resampled_right_audio = None
+
+    return resampled_left_audio, resampled_right_audio
+
+
+def pad(data, amount):
+    if amount >= 0:
+        new_data = np.pad(data, (amount, amount), mode='constant', constant_values=0)
+    else:
+        new_amout = -amount
+        new_data = data[new_amout:-new_amout]
+
+    return new_data
+
+  
+def calculate_rms(waveform):
+    #二乗 → 平均 → 平方根
+    return np.sqrt(np.mean(np.square(waveform)))
+
+
+def phase_vocoder(left_audio, right_audio, pitch):
+    if right_audio is not None:
+        exist_r = True
+    else:
+        exist_r = False
+
+    # 端のデータが復元できるように左右の端に0を付け足す
+    padded_left_audio = pad(left_audio, 4096)
+    if exist_r:
+        padded_right_audio = pad(right_audio, 4096)
+    else:
+        padded_right_audio = None
+
+    # データ大きさが大きいほうをメインとする
+    if exist_r:
+        if calculate_rms(padded_left_audio) >= calculate_rms(padded_right_audio):
+            left_is_master = True
+            master_audio = padded_left_audio
+            slave_audio = padded_right_audio
+        else:
+            left_is_master = False
+            master_audio = padded_right_audio
+            slave_audio = padded_left_audio
+    else:
+        master_audio = padded_left_audio
+        slave_audio = None
+
+    del left_audio, right_audio, padded_left_audio, padded_right_audio
+
+    if exist_r:
+        # デバッグ用
+        print("left_is_master", left_is_master)
+
+    # srは44.1khz, 48kHz仮定
+    win_size = 1024 * 2
+    if pitch >= 1.0:
+        s_step = win_size // 4
+        a_step = s_step / pitch
+    else:
+        a_step = win_size // 4
+        s_step = a_step * pitch
+    # デバッグ用
+    print("a_step:", a_step, "s_step:", s_step, "\n")
+    
+    # ループ回数
+    loop_times = int((len(master_audio) + a_step - 1) / a_step)
+
+    audio_size = int(len(master_audio) * pitch + win_size)
+    new_master_audio = np.zeros(audio_size, dtype=np.float64)
+    if exist_r:
+        new_slave_audio = np.zeros(audio_size, dtype=np.float64)
+    else:
+        new_slave_audio = None
+    wsum = np.zeros(audio_size, dtype=np.float64)
+
+    peak_indices = [0]
+    # 最初のフレームの処理
+    master_seg_audio, slave_seg_audio = audio_to_segment(master_audio, slave_audio, win_size, a_step, 0)
+    new_master_audio, new_slave_audio, wsum = segment_to_audio(master_seg_audio, slave_seg_audio, win_size, s_step, new_master_audio, new_slave_audio, wsum, 0)
+    prev_master_fft = scipy.fft.rfft(master_seg_audio)
+    new_phase_spec = np.angle(prev_master_fft)
+
+    epsilon = 1e-8
+    for i in tqdm(range(1, loop_times), desc="フェーズボコーダ処理"):
+        master_seg_audio, slave_seg_audio = audio_to_segment(master_audio, slave_audio, win_size, a_step, i)
+        master_fft = scipy.fft.rfft(master_seg_audio)
+        new_master_fft, new_phase_spec, peak_indices = edit_phase(prev_master_fft, master_fft, a_step, s_step, new_phase_spec, peak_indices, i)
+        master_ifft = scipy.fft.irfft(new_master_fft)
+        prev_master_fft = master_fft
+        if exist_r:
+            slave_fft = scipy.fft.rfft(slave_seg_audio)
+            mask = np.abs(master_fft) > epsilon
+            len_slave_fft = len(slave_fft)
+            amp_ratio = np.zeros(len_slave_fft, dtype=np.float64)
+            phase_diff = np.zeros(len_slave_fft, dtype=np.float64)
+            amp_ratio[mask] = np.abs(slave_fft[mask]) / np.abs(master_fft[mask])
+            phase_diff[mask] = np.angle(slave_fft[mask]) - np.angle(master_fft[mask])
+            new_slave_fft = amp_ratio * np.abs(new_master_fft) * np.exp(1j * (new_phase_spec + phase_diff))
+            slave_ifft = scipy.fft.irfft(new_slave_fft)
+        else:
+            slave_ifft = None
+        new_master_audio, new_slave_audio, wsum = segment_to_audio(master_ifft, slave_ifft, win_size, s_step, new_master_audio, new_slave_audio, wsum, i)
+
+    # wsumで割るだけ
+    new_master_audio, new_slave_audio = normalize(new_master_audio, new_slave_audio, wsum)
+
+    # 切り出し量はそれらしい量。int(4096 * pitch)ではなさそう？
+    new_master_audio = pad(new_master_audio, -int(2048 * pitch))
+    if exist_r:
+        new_slave_audio = pad(new_slave_audio, -int(2048 * pitch))
+    else:
+        new_slave_audio = None
+
+    if exist_r:
+        if left_is_master:
+            new_left_audio = new_master_audio
+            new_right_audio = new_slave_audio
+        else:
+            new_left_audio = new_slave_audio
+            new_right_audio = new_master_audio
+    else:
+        new_left_audio = new_master_audio
+        new_right_audio = None
+
+    del new_master_audio, new_slave_audio, wsum
+    
+    return new_left_audio, new_right_audio
+
+
 # Wave読み込み
-def read_wav(file_path, normalize=False):
+def read_wav(file_path):
     # サウンドファイルを読み込む
     data, samplerate = sf.read(file_path, dtype=np.float64)
-
-    if normalize:
-        data = data / np.max(np.abs(data))
 
     # ステレオの場合、チャンネルを分離
     if data.ndim == 2:
@@ -268,112 +483,17 @@ def write_wav(file_path, data_l, data_r, samplerate):
     else:
         data = data_l
 
+    # データを正規化
+    #data = data / np.max(np.abs(data))
+
     # 32bit浮動小数型に変換
     data = data.astype(np.float32)
 
+    # 最大値と最小値に収める (浮動小数点誤差を考慮)
+    #data = np.clip(data, -1, 1)
+
     # ファイルを書き出す
     sf.write(file_path, data, samplerate, subtype='FLOAT')
-
-
-def audio_to_segment(data_l, data_r, win_size, a_step, s_step, hop_a, hop_s, i):
-    len_data = len(data_l)
-    win_func = scipy.signal.windows.hann(win_size, sym=False)
-
-    hop_a_start = a_step * i
-    hop_s_start = s_step * i
-    pad_size = win_size * (Settings.pad_multiple - 1)
-
-    center = win_size // 2
-    a_start = int(hop_a_start + 0.5)
-    s_start = int(hop_s_start + 0.5)
-    a_end = a_start + win_size
-    if a_end < len_data:
-        win_data = data_l[a_start:a_end] * win_func
-        pad_win_data = np.pad(win_data, (0, pad_size), mode='constant', constant_values=0)
-        ret_ls = np.roll(pad_win_data, -center)
-    else:
-        rest_size = win_size - len(data_l[a_start:])
-        padded_l = np.pad(data_l[a_start:], (0, rest_size), mode='constant', constant_values=0)
-        win_data = padded_l * win_func
-        pad_win_data = np.pad(win_data, (0, pad_size), mode='constant', constant_values=0)
-        ret_ls = np.roll(pad_win_data, -center)
-    # フレーム間の大きさの記録
-    hop_a[i] = int(hop_a_start + a_step + 0.5) - a_start
-    hop_s[i] = int(hop_s_start + s_step + 0.5) - s_start
-
-    if data_r is not None:
-        if a_end < len_data:
-            win_data = data_r[a_start:a_end] * win_func
-            pad_win_data = np.pad(win_data, (0, pad_size), mode='constant', constant_values=0)
-            ret_rs = np.roll(pad_win_data, -center)
-        else:
-            rest_size = win_size - len(data_r[a_start:])
-            padded_r = np.pad(data_r[a_start:], (0, rest_size), mode='constant', constant_values=0)
-            win_data = padded_r * win_func
-            pad_win_data = np.pad(win_data, (0, pad_size), mode='constant', constant_values=0)
-            ret_rs = np.roll(pad_win_data, -center)
-    else:
-        ret_rs = None
-
-    return ret_ls, ret_rs, hop_a, hop_s
-
-
-def segment_to_audio(data_ls, data_rs, win_size, hop_s, ret_l, ret_r, wsum, i):
-    win_func = scipy.signal.windows.hann(win_size, sym=False)
-
-    center = win_size // 2
-    s_start = np.sum(hop_s[:i])
-    s_end = s_start + win_size
-    ret_l[s_start:s_end] += np.roll(data_ls, center)[:win_size] * win_func
-    if data_rs is not None:
-        ret_r[s_start:s_end] += np.roll(data_rs, center)[:win_size] * win_func
-    else:
-        ret_r = None
-    wsum[s_start:s_end] += win_func ** 2
-
-    return ret_l, ret_r, wsum
-
-
-def normalize(ret_l, ret_r, wsum):
-    epsilon = 1e-8
-    pos = wsum > epsilon
-    ret_l[pos] /= wsum[pos]
-    if ret_r is not None:
-        ret_r[pos] /= wsum[pos]
-
-    return ret_l, ret_r
-
-
-# リサンプリング
-def resampling(left_audio, right_audio, fs, rate):
-    original_fs = int(fs * 1e2 + 0.5)
-    target_fs = int(fs * rate * 1e2 + 0.5)
-    r = Fraction(original_fs, target_fs).limit_denominator()
-    sr_orig = r.numerator
-    sr_new = r.denominator
-
-    resampled_left = resampy.resample(left_audio, sr_orig=sr_orig, sr_new=sr_new, filter='sinc_window', num_zeros=32)
-    if right_audio is not None:
-        resampled_right = resampy.resample(right_audio, sr_orig=sr_orig, sr_new=sr_new, filter='sinc_window', num_zeros=32)
-    else:
-        resampled_right = None
-
-    return resampled_left, resampled_right
-
-
-def pad(data, amount):
-    if amount >= 0:
-        new_data = np.pad(data, (amount, amount), mode='constant', constant_values=0)
-    else:
-        new_amout = -amount
-        new_data = data[new_amout:-new_amout]
-
-    return new_data
-
-  
-def calculate_rms(waveform):
-    #二乗 → 平均 → 平方根
-    return np.sqrt(np.mean(np.square(waveform)))
 
 
 def main():
@@ -381,40 +501,47 @@ def main():
     input_path_obj = choose_file()
 
     print()
+    is_rate = False
     # キー指定
-    is_log = False
     while True:
+        print("To specify a rate, please prefix the number with an 'r'.")
         try:
-            pitchvalue = input('音程(-12 ~ 12) : ')
+            value = input('Pitch (-48 ~ 48) : ')
         except EOFError:
             sys.exit()
-        pitchvalue = pitchvalue.strip() # 空白文字のみの入力は無視する
-        if pitchvalue != '':
-            if pitchvalue[0] == "l":
-                is_log = True
-                pitchvalue = pitchvalue[1:]
+        value = value.strip() # 空白文字のみの入力は無視する
+        if value != '':
+            if value[0] == "r":
+                is_rate = True
+                value = value[1:]
             try: # 数字かチェック
-                pitch_float = float(pitchvalue)
-                if pitch_float <= 48 and pitch_float >= -48: #ピッチの範囲指定
-                    if is_log:
-                        #log(2^(1/12))が底
-                        pitch_float = math.log10(pitch_float) / 0.0250858329719984329344782412270
-                    pitch_1 = round(1.059463094359295264561825294946 ** pitch_float, 12)
-                    break
+                value_float = float(value)
+                if value_float <= 48 and value_float >= -48: #ピッチの範囲
+                    if is_rate:
+                        if 0 < value_float <= 4: #rateの範囲
+                            pitch = value_float
+                            break
+                        else:
+                            print("rateは0以上4以下までです\n")
+                    else:
+                        pitch = round(1.059463094359295264561825294946 ** value_float, 12)
+                        break
                 else:
                     print("ピッチは-48以上48以下までです\n")
             except ValueError:
                 print("数字を入力してください\n")
 
-    # ピッチが+の時に名前に+を入れる
-    if pitch_1 > 1:
-        namepitch = "+" + str(pitch_float)
+    if is_rate:
+        key_name = "rate" + str(value_float)
     else:
-        namepitch = str(pitch_float)
+        if pitch > 1:
+            key_name = "pitch+" + str(value_float)
+        else:
+            key_name = "pitch" + str(value_float)
 
     # ファイル名重複チェック
     base_name = input_path_obj.stem
-    output_path_obj = input_path_obj.with_name(f"{base_name}_pv.key" + str(namepitch) + "_.wav")
+    output_path_obj = input_path_obj.with_name(f"{base_name}_pv." + str(key_name) + "_.wav")
 
     if output_path_obj.exists():
         base_name = output_path_obj.stem
@@ -425,123 +552,21 @@ def main():
         else:
             sys.exit("ファイル名が重複しすぎているため作成できません")
 
+    # 確認用
     print("\ninput:", input_path_obj.name)
-    print("output:", output_path_obj.name)
-    print()
+    print("output:", output_path_obj.name, "\n")
 
     # Wav読み込み
-    data_l, data_r, fs = read_wav(input_path_obj, normalize=False)
+    data_l, data_r, sr = read_wav(input_path_obj)
+
+    new_data_l, new_data_r = phase_vocoder(data_l, data_r, pitch)
     
-    if data_r is not None:
-        exist_r = True
-    else:
-        exist_r = False
-
-    new_data_l = pad(data_l, 4096)
-    if exist_r:
-        new_data_r = pad(data_r, 4096)
-    else:
-        new_data_r = None
-
-    # MID成分とSIDE成分分離
-    if exist_r:
-        if calculate_rms(new_data_l) >= calculate_rms(new_data_r):
-            left_is_master = True
-            data_master = new_data_l
-            data_slave = new_data_r
-        else:
-            left_is_master = False
-            data_master = new_data_r
-            data_slave = new_data_l
-    else:
-        data_master = new_data_l
-        data_slave = None
-
-    del data_l, data_r, new_data_l, new_data_r
-    
-    if exist_r:
-        print("left_is_master", left_is_master)
-
-    # fsが44.1khz, 48kHz仮定
-    win_size = 1024 * 2
-    if pitch_1 >= 1.0:
-        s_step = win_size // 4
-        a_step = s_step / pitch_1
-    else:
-        a_step = win_size // 4
-        s_step = a_step * pitch_1
-    print("a_step:", a_step, "s_step:", s_step, "\n")
-    
-    # 配列の準備
-    end_range = int((len(data_master) + a_step - 1) / a_step)
-    hop_a = np.zeros(end_range, dtype=np.int64)
-    hop_s = np.zeros(end_range, dtype=np.int64)
-
-    audio_size = int(len(data_master) * pitch_1 + win_size)
-    ret_l = np.zeros(audio_size, dtype=np.float64)
-    if exist_r:
-        ret_r = np.zeros(audio_size, dtype=np.float64)
-    else:
-        ret_r = None
-    wsum = np.zeros(audio_size, dtype=np.float64)
-
-    peak_indices = [0]
-    # 最初のフレームの処理
-    data_master_seg, data_slave_seg, hop_a, hop_s = audio_to_segment(data_master, data_slave, win_size, a_step, s_step, hop_a, hop_s, 0)
-    ret_l, ret_r, wsum = segment_to_audio(data_master_seg, data_slave_seg, win_size, hop_s, ret_l, ret_r, wsum, 0)
-    FFT_master_prev = scipy.fft.rfft(data_master_seg)
-    new_phase_spectrogram = np.angle(FFT_master_prev)
-    epsilon = 1e-8
-
-    for i in tqdm(range(1, end_range), desc="フェーズボコーダ処理"):
-        data_master_seg, data_slave_seg, hop_a, hop_s = audio_to_segment(data_master, data_slave, win_size, a_step, s_step, hop_a, hop_s, i)
-        FFT_master = scipy.fft.rfft(data_master_seg)
-        new_FFT_master, new_phase_spectrogram, peak_indices = phase_vocoder(FFT_master_prev, FFT_master, hop_a[i-1], hop_s[i-1], new_phase_spectrogram, peak_indices, pitch_1)
-        IFFT_master = scipy.fft.irfft(new_FFT_master)
-        FFT_master_prev = FFT_master
-        if exist_r:
-            FFT_slave = scipy.fft.rfft(data_slave_seg)
-            mask = np.abs(FFT_master) > epsilon
-            len_FFT_slave = len(FFT_slave)
-            amp_ratio = np.zeros(len_FFT_slave, dtype=np.float64)
-            phase_diff = np.zeros(len_FFT_slave, dtype=np.float64)
-            amp_ratio[mask] = np.abs(FFT_slave[mask]) / np.abs(FFT_master[mask])
-            phase_diff[mask] = np.angle(FFT_slave[mask]) - np.angle(FFT_master[mask])
-            new_FFT_slave = amp_ratio * np.abs(new_FFT_master) * np.exp(1j * (new_phase_spectrogram + phase_diff))
-            IFFT_slave = scipy.fft.irfft(new_FFT_slave)
-        else:
-            IFFT_slave = None
-        ret_l, ret_r, wsum = segment_to_audio(IFFT_master, IFFT_slave, win_size, hop_s, ret_l, ret_r, wsum, i)
-
-    ret_master, ret_slave = normalize(ret_l, ret_r, wsum)
-    del ret_l, ret_r, wsum
-
-    ret_master = pad(ret_master, -int(2048 * pitch_1))
-    if exist_r:
-        ret_slave = pad(ret_slave, -int(2048 * pitch_1))
-    else:
-        ret_slave = None
-
     # リサンプリング
     if Settings.resampling == 1:
-        ret_master, ret_slave = resampling(ret_master, ret_slave, fs, 1/pitch_1)
-
-    # ステレオ復元
-    if exist_r:
-        if left_is_master:
-            ret_data_l = ret_master
-            ret_data_r = ret_slave
-        else:
-            ret_data_l = ret_slave
-            ret_data_r = ret_master
-    else:
-        ret_data_l = ret_master
-        ret_data_r = None
-
-    del ret_master, ret_slave
+        new_data_l, new_data_r = resampling(new_data_l, new_data_r, sr, 1/pitch)
 
     #書き出し
-    write_wav(output_path_obj, ret_data_l, ret_data_r, fs)
+    write_wav(output_path_obj, new_data_l, new_data_r, sr)
 
 
 if __name__ == "__main__":
