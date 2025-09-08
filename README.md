@@ -28,4 +28,4 @@ The waveform of the original audio:
 <img width="1737" height="339" alt="audio-x" src="https://github.com/user-attachments/assets/94107c79-134d-410e-a022-a97d59793487" />
 
 The waveform after time-stretching:
-<img width="1737" height="336" alt="audio-x_1 5" src="https://github.com/user-attachments/assets/28c24c66-beef-4929-bc15-0b2bcadf8537" />
+<img width="1736" height="341" alt="audio-x_r1.5" src="https://github.com/user-attachments/assets/e5d5bb8e-762f-4b96-aa64-ca99a12d1b84" />
