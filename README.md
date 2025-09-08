@@ -1,4 +1,4 @@
-# Phase_Vocoder
+# Phase Vocoder
 Phase Vocoder implemented in Python.  
 
 ## Required Libraries
@@ -32,5 +32,5 @@ The waveform after time-stretching:
 <img width="1736" height="341" alt="audio-x_r1.5" src="https://github.com/user-attachments/assets/e5d5bb8e-762f-4b96-aa64-ca99a12d1b84" />
 
 ## Reference
-1. フェーズボコーダーによるタイムストレッチ - C# [https://qiita.com/takayoshi1968/items/f7644df1f58dc1152bd9](https://qiita.com/takayoshi1968/items/f7644df1f58dc1152bd9)
-2. Time-scale Modification using the Phase Vocoder [https://old.iem.at/projekte/dsp/hammer/hammer.pdf](https://old.iem.at/projekte/dsp/hammer/hammer.pdf)
+- フェーズボコーダーによるタイムストレッチ - C# [https://qiita.com/takayoshi1968/items/f7644df1f58dc1152bd9](https://qiita.com/takayoshi1968/items/f7644df1f58dc1152bd9)
+- Time-scale Modification using the Phase Vocoder [https://old.iem.at/projekte/dsp/hammer/hammer.pdf](https://old.iem.at/projekte/dsp/hammer/hammer.pdf)
