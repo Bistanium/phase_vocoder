@@ -13,7 +13,6 @@ from tqdm import tqdm
 
 
 class Settings:
-    # When enabled, it performs pitch shifting instead of time stretching.
     # enabled:1  disabled:0
     resampling = 0
     # 0埋め倍数  recommended 2 or 4
@@ -109,32 +108,103 @@ def detect_peaks(data, n_min=2, n_max=10):
 
 
 @njit(cache=True)
-def pair_by_closest(A, B, length, n_min=2, n_max=32):
-    i = len(A) - 1
-    length_B = len(B)
-    result_A = np.empty(length_B, dtype=np.int64)
-    result_B = np.empty(length_B, dtype=np.int64)
-    idx = length_B - 1
+def pair_by_closest(A, B, length, n_min, n_max):
+    mB = B.shape[0]
+
     t_array = np.linspace(n_min, n_max, length).astype(np.int64)
 
-    for b_idx in range(length_B - 1, -1, -1):
-        peak = B[b_idx]
+    t_vals = t_array[B]
 
-        while i - 1 >= 0 and abs(A[i - 1] - peak) <= abs(A[i] - peak):
-            i -= 1
+    # searchsorted で left/right を一括取得
+    left = np.searchsorted(A, B - t_vals, side='left')
+    right = np.searchsorted(A, B + t_vals, side='right')
 
-        threshold = t_array[peak]
-        if i >= 0 and abs(A[i] - peak) <= threshold:
-            result_A[idx] = A[i]
-            result_B[idx] = peak
-            i -= 1
+    counts_in_window = right - left
+    counts_per_row = counts_in_window + 1  # フォールバック分
+    max_cand = np.max(counts_per_row)
+
+    # 候補行列
+    cand = np.full((mB, max_cand), -1, dtype=A.dtype)
+
+    # 候補生成
+    for k in range(mB):
+        l = left[k]
+        r = right[k]
+        L = r - l
+        if L > 0:
+            vals = A[l:r].copy()
+            dists = np.abs(vals - B[k])
+            # 安定ソート (選択ソート)
+            for i in range(L):
+                best = i
+                for j in range(i + 1, L):
+                    if dists[j] < dists[best]:
+                        best = j
+                    elif dists[j] == dists[best] and vals[j] < vals[best]:
+                        best = j
+                if best != i:
+                    tmpv = vals[i]
+                    vals[i] = vals[best]
+                    vals[best] = tmpv
+                    tmpd = dists[i]
+                    dists[i] = dists[best]
+                    dists[best] = tmpd
+            for i in range(L):
+                cand[k, i] = vals[i]
+            cand[k, L] = B[k]
         else:
-            result_A[idx] = peak
-            result_B[idx] = peak
+            cand[k, 0] = B[k]
 
-        idx -= 1
+    # ポインタと初期割り当て
+    ptr = np.zeros(mB, dtype=np.int64)
+    rA = np.empty(mB, dtype=A.dtype)
+    for k in range(mB):
+        rA[k] = cand[k, ptr[k]]
 
-    return result_A, result_B
+    # 重複解消
+    while True:
+        any_dup = False
+        progressed = False
+        processed = np.zeros(mB, dtype=np.uint8)
+
+        for i in range(mB):
+            if processed[i]:
+                continue
+            v = rA[i]
+            idxs = np.empty(mB, dtype=np.int64)
+            cnt = 0
+            for j in range(mB):
+                if rA[j] == v:
+                    idxs[cnt] = j
+                    cnt += 1
+            for q in range(cnt):
+                processed[idxs[q]] = 1
+
+            if cnt > 1:
+                any_dup = True
+                keeper = idxs[0]
+                best_dist = abs(B[keeper] - v)
+                for q in range(1, cnt):
+                    cur = idxs[q]
+                    dist = abs(B[cur] - v)
+                    if dist < best_dist:
+                        keeper = cur
+                        best_dist = dist
+                    elif dist == best_dist and B[cur] > B[keeper]:
+                        keeper = cur
+                for q in range(cnt):
+                    cur = idxs[q]
+                    if cur == keeper:
+                        continue
+                    if ptr[cur] < counts_per_row[cur] - 1:
+                        ptr[cur] += 1
+                        rA[cur] = cand[cur, ptr[cur]]
+                        progressed = True
+
+        if not any_dup or not progressed:
+            break
+
+    return rA, B
 
 
 @njit(cache=True)
@@ -254,13 +324,11 @@ def audio_to_segment(data_l, data_r, win_size, a_step, i):
     win_func = scipy.signal.windows.hann(win_size, sym=False)
 
     pad_size = win_size * (Settings.pad_multiple - 1)
-    """
-    center の値表
-    xxXyy000000 : 0
-    000000xxXyy : win_size
-    000xxXyy000 : -pad_size // 2
-    Xyy000000xx : win_size // 2
-    """
+    # center の値表
+    # xxXyy000000 : 0
+    # 000000xxXyy : win_size
+    # 000xxXyy000 : -pad_size // 2
+    # Xyy000000xx : win_size // 2
     center = win_size // 2
     start = int(a_step * i + 0.5)
     end = start + win_size
@@ -406,7 +474,7 @@ def phase_vocoder(left_audio, right_audio, pitch):
         new_slave_audio = None
     wsum = np.zeros(audio_size, dtype=np.float64)
 
-    peak_indices = [0]
+    peak_indices = np.array([0])
     # 最初のフレームの処理
     master_seg_audio, slave_seg_audio = audio_to_segment(master_audio, slave_audio, win_size, a_step, 0)
     new_master_audio, new_slave_audio, wsum = segment_to_audio(master_seg_audio, slave_seg_audio, win_size, s_step, new_master_audio, new_slave_audio, wsum, 0)
@@ -560,7 +628,7 @@ def main():
     data_l, data_r, sr = read_wav(input_path_obj)
 
     new_data_l, new_data_r = phase_vocoder(data_l, data_r, pitch)
-    
+
     # リサンプリング
     if Settings.resampling == 1:
         new_data_l, new_data_r = resampling(new_data_l, new_data_r, sr, 1/pitch)
