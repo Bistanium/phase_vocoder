@@ -21,8 +21,8 @@ There is a section in the program where the user can modify the `resampling` var
 - By default, `resampling` is set to 0, which performs time stretching.  
 - To perform pitch shifting instead, set `resampling` to 1.
 
-<img width="630" height="154" alt="resampling-0" src="https://github.com/user-attachments/assets/9d6d7ed5-74b9-4a1d-b522-b5bf632ffb9a" />
-<img width="628" height="150" alt="resampling-1" src="https://github.com/user-attachments/assets/ef7e4cf0-5966-45ad-bf69-6739f8cbce04" />
+<img width="322" height="133" alt="resampling-0" src="https://github.com/user-attachments/assets/6302a244-ab95-4b52-a16d-d0b2ab7efaeb" />
+<img width="318" height="129" alt="image" src="https://github.com/user-attachments/assets/0405bb9d-b68b-4e77-88a4-3665d49cf8be" />
 
 ## Result
 The waveform of the original audio:
