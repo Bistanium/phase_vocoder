@@ -1,5 +1,5 @@
 # Phase Vocoder
-Phase Vocoder implemented in Python.  
+Phase vocoders enable time stretching and pitch shifting.
 
 ## Required Libraries
 | Library   | Version |
