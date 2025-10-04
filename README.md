@@ -17,13 +17,13 @@ Phase vocoders enable time stretching and pitch shifting.
 3. Enter a value (time-stretch rate or target pitch).
 
 ## Additional note
-There is a section in the program where the user can modify the `resampling` variable.  
-- By default, `resampling` is set to 0, which performs time stretching.  
-- To perform pitch shifting instead, set `resampling` to 1.
+- WAV files must have a sampling rate of either 44.1 kHz or 48 kHz.
+- There is a section in the program where the user can modify the `resampling` variable.  
+  - By default, `resampling` is set to 0, which performs time stretching.  
+  - To perform pitch shifting instead, set `resampling` to 1.
 
 <img width="350" height="152" alt="image" src="https://github.com/user-attachments/assets/aa58f653-6b8e-4f77-9d55-fbc37e45b137" />
 <img width="347" height="150" alt="image" src="https://github.com/user-attachments/assets/b57d4368-34c7-433f-ab8a-cba775095d61" />
-
 
 ## Result
 The waveform shown on top is the original, and the one below is the result of time-stretching the signal by a factor of 1.5.
