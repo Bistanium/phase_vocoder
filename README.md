@@ -21,15 +21,13 @@ There is a section in the program where the user can modify the `resampling` var
 - By default, `resampling` is set to 0, which performs time stretching.  
 - To perform pitch shifting instead, set `resampling` to 1.
 
-<img width="322" height="133" alt="resampling-0" src="https://github.com/user-attachments/assets/6302a244-ab95-4b52-a16d-d0b2ab7efaeb" />
-<img width="318" height="129" alt="image" src="https://github.com/user-attachments/assets/0405bb9d-b68b-4e77-88a4-3665d49cf8be" />
+<img width="350" height="152" alt="image" src="https://github.com/user-attachments/assets/aa58f653-6b8e-4f77-9d55-fbc37e45b137" />
+<img width="347" height="150" alt="image" src="https://github.com/user-attachments/assets/b57d4368-34c7-433f-ab8a-cba775095d61" />
+
 
 ## Result
-The waveform of the original audio:
-<img width="1737" height="339" alt="audio-x" src="https://github.com/user-attachments/assets/94107c79-134d-410e-a022-a97d59793487" />
-
-The waveform after time-stretching:
-<img width="1736" height="341" alt="audio-x_r1.5" src="https://github.com/user-attachments/assets/e5d5bb8e-762f-4b96-aa64-ca99a12d1b84" />
+The waveform shown on top is the original, and the one below is the result of time-stretching the signal by a factor of 1.5.
+<img width="1741" height="636" alt="image" src="https://github.com/user-attachments/assets/778fccb4-dd45-4f69-8598-844f86ee40ef" />
 
 ## Reference
 - フェーズボコーダーによるタイムストレッチ - C# [https://qiita.com/takayoshi1968/items/f7644df1f58dc1152bd9](https://qiita.com/takayoshi1968/items/f7644df1f58dc1152bd9)
