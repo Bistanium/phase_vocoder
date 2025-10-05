@@ -89,7 +89,7 @@ def divide_into_regions(data, n_min, n_max):
 
 
 @njit(cache=True)
-def detect_peaks(data, n_min=2, n_max=20):
+def detect_peaks(data, n_min=2, n_max=2):
     length = len(data)
     n_array = np.linspace(n_min, n_max, length).astype(np.int64)
 
@@ -120,7 +120,7 @@ def detect_peaks(data, n_min=2, n_max=20):
     return peaks[:count]
 
 
-def detect_transients(magnitude_prev, magnitude, threshold=0.125):
+def detect_transients(magnitude_prev, magnitude, threshold=0.13):
     prev_frame_sums = np.sum(magnitude_prev)
     frame_sums = np.sum(magnitude)
     if prev_frame_sums < 1e-2 or frame_sums < 1e-2:
@@ -185,7 +185,8 @@ def modify_phase(prev_spectrogram, spectrogram, a_step, s_step, prev_new_phase_s
     true_transient = is_transient and b_is_transient and not bb_is_transient
 
     # スペクトラムごとに領域とピークを検出
-    n_min, n_max = 2, 2
+    n_min = 1
+    n_max = 4
     t_regions, t_peak_indices = divide_into_regions(magnitude_spectrogram, n_min, n_max)
 
     if true_transient:
@@ -609,3 +610,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
