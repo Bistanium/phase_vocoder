@@ -29,7 +29,7 @@ Phase vocoders enable time stretching and pitch shifting.
 
 ## Result
 The waveform shown on top is the original, and the one below is the result of time-stretching the signal by a factor of 1.5.
-<img width="1741" height="636" alt="image" src="https://github.com/user-attachments/assets/778fccb4-dd45-4f69-8598-844f86ee40ef" />
+<img width="1735" height="633" alt="image" src="https://github.com/user-attachments/assets/263a81f9-aedd-425a-9a30-44724468b9c9" />
 
 ## Reference
 - フェーズボコーダーによるタイムストレッチ - C# [https://qiita.com/takayoshi1968/items/f7644df1f58dc1152bd9](https://qiita.com/takayoshi1968/items/f7644df1f58dc1152bd9)
