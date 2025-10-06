@@ -1,4 +1,4 @@
-# Phase Vocoder
+# Phase Vocoder in Python
 Phase vocoders enable time stretching and pitch shifting.
 
 [https://github.com/Bistanium/phase_vocoder](https://github.com/Bistanium/phase_vocoder)
