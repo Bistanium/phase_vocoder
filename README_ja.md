@@ -2,6 +2,15 @@
 
 [https://github.com/Bistanium/phase_vocoder](https://github.com/Bistanium/phase_vocoder)
 
+<table>
+	<thead>
+    	<tr>
+      		<th style="text-align:center"><a href="README.md">English</a></th>
+			    <th style="text-align:center">日本語</th>
+    	</tr>
+  	</thead>
+</table>
+
 フェーズボコーダを使うとタイムストレッチとピッチシフトが可能になります。
 
 ## 必要なライブラリ
