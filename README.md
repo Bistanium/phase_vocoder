@@ -2,6 +2,15 @@
 
 [https://github.com/Bistanium/phase_vocoder](https://github.com/Bistanium/phase_vocoder)
 
+<table>
+	<thead>
+    	<tr>
+      		<th style="text-align:center">English</th>
+      		<th style="text-align:center"><a href="README_ja.md">日本語</a></th>
+    	</tr>
+  	</thead>
+</table>
+
 Phase vocoders enable time stretching and pitch shifting.
 
 ## Required Libraries
@@ -20,7 +29,6 @@ Phase vocoders enable time stretching and pitch shifting.
 3. Enter a value (time-stretch rate or target pitch).
 
 ## Additional note
-- WAV files must have a sampling rate of either 44.1 kHz or 48 kHz.
 - There is a section in the program where the user can modify the `resampling` variable.  
   - By default, `resampling` is set to 0, which performs time stretching.  
   - To perform pitch shifting instead, set `resampling` to 1.
