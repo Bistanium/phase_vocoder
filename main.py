@@ -319,8 +319,7 @@ def normalize(ret_l, ret_r, wsum):
 def _pad_single(data, amount):
     if data is not None:
         if amount >= 0:
-            return np.pad(data, (amount, amount),
-                          mode='constant', constant_values=0)
+            return np.pad(data, (amount, amount), mode='constant', constant_values=0)
         else:
             new_amount = -amount
             return data[new_amount:-new_amount]
@@ -340,33 +339,30 @@ def calculate_rms(waveform):
     # 二乗 → 平均 → 平方根
     return np.sqrt(np.mean(np.square(waveform)))
 
+# リサンプリング
+def resampling(left_audio, right_audio, sr, rate):
+    original_sr = int(sr * 1e2 + 0.5)
+    target_sr = int(sr * rate * 1e2 + 0.5)
+    # 最大公約数で割っておいたほうが速いらしい
+    r = Fraction(original_sr, target_sr).limit_denominator()
+    sr_orig = r.numerator
+    sr_new = r.denominator
 
-def phase_vocoder(left_audio, right_audio, pitch, win_size):
+    # 引数は処理が速くて音質が悪くないものを選んだ
+    resampled_left_audio = resampy.resample(left_audio, sr_orig=sr_orig, sr_new=sr_new, filter='sinc_window', num_zeros=32)
+    if right_audio is not None:
+        resampled_right_audio = resampy.resample(right_audio, sr_orig=sr_orig, sr_new=sr_new, filter='sinc_window', num_zeros=32)
+    else:
+        resampled_right_audio = None
+
+    return resampled_left_audio, resampled_right_audio
+
+
+def phase_vocoder_single(left_audio, right_audio, pitch, win_size):
     if right_audio is not None:
         exist_r = True
     else:
         exist_r = False
-
-    # データ大きさが大きいほうをメインとする
-    if exist_r:
-        if calculate_rms(left_audio) >= calculate_rms(right_audio):
-            left_is_master = True
-            master_audio = left_audio
-            slave_audio = right_audio
-        else:
-            left_is_master = False
-            master_audio = right_audio
-            slave_audio = left_audio
-    else:
-        master_audio = left_audio
-        slave_audio = None
-
-    del left_audio, right_audio
-
-    print()
-    if exist_r:
-        # デバッグ用
-        print("left_is_master", left_is_master)
 
     overlap = int(100 / (100 - Settings.overlap_rate) + 0.5)
     if pitch >= 1.0:
@@ -376,17 +372,18 @@ def phase_vocoder(left_audio, right_audio, pitch, win_size):
         a_step = win_size // overlap
         s_step = a_step * pitch
     # デバッグ用
+    print()
     print("win_size:", win_size, "a_step:", a_step, "s_step:", s_step)
 
     # ループ回数
-    loop_times = int((len(master_audio) + a_step - 1) / a_step)
+    loop_times = int((len(left_audio) + a_step - 1) / a_step)
 
-    audio_size = int(len(master_audio) * pitch + win_size) + 4096
-    new_master_audio = np.zeros(audio_size, dtype=np.float64)
+    audio_size = int(len(left_audio) * pitch + win_size) + 4096
+    new_left_audio = np.zeros(audio_size, dtype=np.float64)
     if exist_r:
-        new_slave_audio = np.zeros(audio_size, dtype=np.float64)
+        new_right_audio = np.zeros(audio_size, dtype=np.float64)
     else:
-        new_slave_audio = None
+        new_right_audio = None
     wsum = np.zeros(audio_size, dtype=np.float64)
 
     eps = 1e-6
@@ -394,97 +391,169 @@ def phase_vocoder(left_audio, right_audio, pitch, win_size):
     pastpast_transient = False
 
     # 最初のフレームの処理
-    master_seg_audio, slave_seg_audio = audio_to_segment(master_audio, slave_audio, win_size, a_step, 0)
-    new_master_audio, new_slave_audio, wsum = segment_to_audio(
-        master_seg_audio, slave_seg_audio, win_size, s_step, new_master_audio, new_slave_audio, wsum, 0
+    left_seg_audio, right_seg_audio = audio_to_segment(left_audio, right_audio, win_size, a_step, 0)
+    new_left_audio, new_right_audio, wsum = segment_to_audio(
+        left_seg_audio, right_seg_audio, win_size, s_step, new_left_audio, new_right_audio, wsum, 0
     )
-    prev_master_fft = scipy.fft.rfft(master_seg_audio)
-    new_master_phase = np.angle(prev_master_fft)
+    prev_left_fft = scipy.fft.rfft(left_seg_audio)
+    new_left_phase = np.angle(prev_left_fft)
 
-    for i in tqdm(range(1, loop_times), desc="フェーズボコーダ処理"):
-        master_seg_audio, slave_seg_audio = audio_to_segment(master_audio, slave_audio, win_size, a_step, i)
-        master_fft = scipy.fft.rfft(master_seg_audio)
+    for i in tqdm(range(1, loop_times)):
+        left_seg_audio, right_seg_audio = audio_to_segment(left_audio, right_audio, win_size, a_step, i)
+        left_fft = scipy.fft.rfft(left_seg_audio)
 
-        new_master_fft, new_master_phase, past_transient, pastpast_transient = modify_phase(
-            prev_master_fft, master_fft, a_step, s_step, new_master_phase, i, past_transient, pastpast_transient, win_size
+        new_left_fft, new_left_phase, past_transient, pastpast_transient = modify_phase(
+            prev_left_fft, left_fft, a_step, s_step, new_left_phase, i, past_transient, pastpast_transient, win_size
         )
-        master_ifft = scipy.fft.irfft(new_master_fft)
-        prev_master_fft = master_fft
+        left_ifft = scipy.fft.irfft(new_left_fft)
+        prev_left_fft = left_fft
 
         if exist_r:
-            slave_fft = scipy.fft.rfft(slave_seg_audio)
+            right_fft = scipy.fft.rfft(right_seg_audio)
             # 振幅が小さすぎる周波数ビンは位相が不安定らしいので計算しない
-            mask = np.abs(master_fft) > eps
-            phase_diff_slave = np.zeros(len(slave_fft), dtype=np.float64)
-            phase_diff_slave[mask] = np.angle(slave_fft[mask]) - np.angle(master_fft[mask])
+            mask = np.abs(left_fft) > eps
+            phase_diff_right = np.zeros(len(right_fft), dtype=np.float64)
+            phase_diff_right[mask] = np.angle(right_fft[mask]) - np.angle(left_fft[mask])
             # 直交形式に変換
-            new_slave_fft = np.abs(slave_fft) * np.exp(1j * (new_master_phase + phase_diff_slave))
-            slave_ifft = scipy.fft.irfft(new_slave_fft)
+            new_right_fft = np.abs(right_fft) * np.exp(1j * (new_left_phase + phase_diff_right))
+            right_ifft = scipy.fft.irfft(new_right_fft)
         else:
-            slave_ifft = None
+            right_ifft = None
 
-        new_master_audio, new_slave_audio, wsum = segment_to_audio(
-            master_ifft, slave_ifft, win_size, s_step, new_master_audio, new_slave_audio, wsum, i
+        new_left_audio, new_right_audio, wsum = segment_to_audio(
+            left_ifft, right_ifft, win_size, s_step, new_left_audio, new_right_audio, wsum, i
         )
 
     # wsum(窓関数補正値)で割るだけ
-    new_master_audio, new_slave_audio = normalize(new_master_audio, new_slave_audio, wsum)
+    new_left_audio, new_right_audio = normalize(new_left_audio, new_right_audio, wsum)
+
+    return new_left_audio, new_right_audio
+
+
+def phase_vocoder(data_l, data_r, sr, pitch):
+    if data_r is not None:
+        exist_r = True
+    else:
+        exist_r = False
+
+    baisuuyou = sr
+    baisu_ct = 0
+    while baisuuyou > 0:
+        baisuuyou -= 48000
+        baisu_ct += 1
+
+    shori_sr = 48000 * baisu_ct
+    if sr != shori_sr:
+        data_l, data_r = resampling(data_l, data_r, sr, shori_sr/sr)
+
+    # 端のデータが復元できるように左右の端に0を付け足す
+    padded_data_l, padded_data_r = pad([data_l, data_r], 4096)
+    
+    # データ大きさが大きいほうをメインとする
+    if exist_r:
+        if calculate_rms(padded_data_l) >= calculate_rms(padded_data_r):
+            left_is_master = True
+            master_audio = padded_data_l
+            slave_audio = padded_data_r
+        else:
+            left_is_master = False
+            master_audio = padded_data_r
+            slave_audio = padded_data_l
+    else:
+        master_audio = padded_data_l
+        slave_audio = None
+
+    # 分ける帯域の境目
+    fc_himi = 2000
+    fc_lomi = 400
+    numtaps = Settings.numtaps
+    if numtaps % 2 == 0:
+        numtaps += 1
+
+    non_high_data_m, high_data_m = crossover_fir(master_audio, shori_sr, fc_himi, numtaps)
+    low_data_m, mid_data_m = crossover_fir(non_high_data_m, shori_sr, fc_lomi, numtaps)
+
+    if exist_r:
+        non_high_data_s, high_data_s = crossover_fir(slave_audio, shori_sr, fc_himi, numtaps)
+        low_data_s, mid_data_s = crossover_fir(non_high_data_s, shori_sr, fc_lomi, numtaps)
+    else:
+        high_data_s = None
+        mid_data_s = None
+        low_data_s = None
+
+    # 解析に使うfftサイズ
+    # 変えるのはあまりよくない選択
+    fft_size_high = baisu_ct * 1024 * 1
+    fft_size_mid = baisu_ct * 1024 * 2
+    fft_size_low = baisu_ct * 1024 * 4
+
+    new_high_data_m, new_high_data_s = phase_vocoder_single(high_data_m, high_data_s, pitch, fft_size_high)
+    new_mid_data_m, new_mid_data_s = phase_vocoder_single(mid_data_m, mid_data_s, pitch, fft_size_mid)
+    new_low_data_m, new_low_data_s = phase_vocoder_single(low_data_m, low_data_s, pitch, fft_size_low)
+
+    # 帯域ごとに謎のズレがあるのでその補正
+    if pitch > 1:
+        # おそらくこの値が正解？
+        n = math.log10(pitch) / 0.301029995663981195213738894724
+        a = int(round(256 * n * (n + 1) * (n + 2) / 3))
+        zure_high = a
+        # +12のときの補正値
+        zure_mid = 2 * a
+        zure_low = 4 * a
+    elif pitch < 1:
+        # pitch<1の正確な値の計算はわかっていない
+        if 0.5 < pitch:
+            n = -math.log10(pitch) / 0.301029995663981195213738894724
+            a = int(round(-256 * n))
+            zure_high = a
+            zure_mid = 2 * a
+            zure_low = 4 * a
+        else:
+            a = -512
+            zure_high = a
+            zure_mid = 2 * a
+            zure_low = 4 * a
+    else:
+        zure_high = 0
+        zure_mid = 0
+        zure_low = 0
+
+    new_high_data_m, new_high_data_s = pad([new_high_data_m, new_high_data_s], zure_high)
+    new_mid_data_m, new_mid_data_s = pad([new_mid_data_m, new_mid_data_s], zure_mid)
+    new_low_data_m, new_low_data_s = pad([new_low_data_m, new_low_data_s], zure_low)
+
+    # 最も短い波形に合わせるため
+    mostminsize = min(len(new_high_data_m), len(new_mid_data_m), len(new_mid_data_m))
+    new_data_m = new_high_data_m[:mostminsize] + new_mid_data_m[:mostminsize] + new_low_data_m[:mostminsize]
+    if exist_r:
+        new_data_s = new_high_data_s[:mostminsize] + new_mid_data_s[:mostminsize] + new_low_data_s[:mostminsize]
+    else:
+        new_data_s = None
+
+    # 最初のゼロ埋め分の削除
+    new_data_m, new_data_s = pad([new_data_m, new_data_s], -int(4096*pitch))
+
+    # リサンプリング(ピッチシフト用)
+    if Settings.resampling == 1:
+        new_data_m, new_data_s = resampling(new_data_m, new_data_s, shori_sr, 1/pitch)
+
+    # 48kHzに統一していたので元に戻しておく
+    if sr != shori_sr:
+        new_data_m, new_data_s = resampling(new_data_m, new_data_s, shori_sr, sr/shori_sr)
 
     # leftとrightに割り振る
     if exist_r:
         if left_is_master:
-            new_left_audio = new_master_audio
-            new_right_audio = new_slave_audio
+            new_data_l = new_data_m
+            new_data_r = new_data_s
         else:
-            new_left_audio = new_slave_audio
-            new_right_audio = new_master_audio
+            new_data_l = new_data_s
+            new_data_r = new_data_m
     else:
-        new_left_audio = new_master_audio
-        new_right_audio = None
+        new_data_l = new_data_m
+        new_data_r = None
 
-    del new_master_audio, new_slave_audio, wsum
-    
-    return new_left_audio, new_right_audio
-
-
-def choose_file():
-    # ファイル選択
-    while True:
-        fTyp = [("Audio File", ".wav"), ("wav", ".wav")]
-        input_name = tkinter.filedialog.askopenfilename(filetypes = fTyp)
-        # pathlibは何かと便利らしい
-        input_path_obj = Path(input_name)
-
-        if input_name:
-            # 拡張子のみ得る
-            extension = input_path_obj.suffix
-            # fTypから拡張子部分だけ得る
-            extension_list = list(fTyp[0][1:])
-            if extension in extension_list:
-                break
-            else:
-                raise ValueError("不正なファイルです")
-        else:
-            sys.exit()
-
-    return input_path_obj
-
-
-def crate_output_path_obj(temp_output_path_obj, max=100):
-    output_path_obj = temp_output_path_obj
-    if output_path_obj.exists():
-        # 拡張子以外を得る
-        base_name = output_path_obj.stem
-        for i in range(1, max):
-            # 名前の後ろに数字を加える
-            output_path_obj = output_path_obj.with_name(f"{base_name} ({i}).wav")
-            # 同じファイル名のものがなければ終わり
-            if not output_path_obj.exists():
-                break
-        else:
-            raise ValueError("ファイル名が重複しすぎているため作成できません")
-
-    return output_path_obj
+    return new_data_l, new_data_r
 
 
 # Wav読み込み
@@ -550,23 +619,44 @@ def write_wav(file_path, data, samplerate):
     sf.write(file_path, data, samplerate, subtype='FLOAT')
 
 
-# リサンプリング
-def resampling(left_audio, right_audio, sr, rate):
-    original_sr = int(sr * 1e2 + 0.5)
-    target_sr = int(sr * rate * 1e2 + 0.5)
-    # 最大公約数で割っておいたほうが速いらしい
-    r = Fraction(original_sr, target_sr).limit_denominator()
-    sr_orig = r.numerator
-    sr_new = r.denominator
+def choose_file():
+    # ファイル選択
+    while True:
+        fTyp = [("Audio File", ".wav"), ("wav", ".wav")]
+        input_name = tkinter.filedialog.askopenfilename(filetypes = fTyp)
+        # pathlibは何かと便利らしい
+        input_path_obj = Path(input_name)
 
-    # 引数は処理が速くて音質が悪くないものを選んだ
-    resampled_left_audio = resampy.resample(left_audio, sr_orig=sr_orig, sr_new=sr_new, filter='sinc_window', num_zeros=32)
-    if right_audio is not None:
-        resampled_right_audio = resampy.resample(right_audio, sr_orig=sr_orig, sr_new=sr_new, filter='sinc_window', num_zeros=32)
-    else:
-        resampled_right_audio = None
+        if input_name:
+            # 拡張子のみ得る
+            extension = input_path_obj.suffix
+            # fTypから拡張子部分だけ得る
+            extension_list = list(fTyp[0][1:])
+            if extension in extension_list:
+                break
+            else:
+                raise ValueError("不正なファイルです")
+        else:
+            sys.exit()
 
-    return resampled_left_audio, resampled_right_audio
+    return input_path_obj
+
+
+def crate_output_path_obj(temp_output_path_obj, max=100):
+    output_path_obj = temp_output_path_obj
+    if output_path_obj.exists():
+        # 拡張子以外を得る
+        base_name = output_path_obj.stem
+        for i in range(1, max):
+            # 名前の後ろに数字を加える
+            output_path_obj = output_path_obj.with_name(f"{base_name} ({i}).wav")
+            # 同じファイル名のものがなければ終わり
+            if not output_path_obj.exists():
+                break
+        else:
+            raise ValueError("ファイル名が重複しすぎているため作成できません")
+
+    return output_path_obj
 
 
 def main():
@@ -577,40 +667,48 @@ def main():
     is_rate = False
     # キー指定
     while True:
-        print("To specify a rate, please prefix the number with an 'r'.")
+        print("To specify a rate, please prefix the number with an 'r'.^nRate (0.0625 ~ 16)")
         try:
             value = input('Pitch (-48 ~ 48) : ')
         except EOFError:
             sys.exit()
+
         value = value.strip() # 空白文字のみの入力は無視する
-        if value != '':
-            if value[0] == "r":
-                is_rate = True
-                value = value[1:]
-            try: # 数字かチェック
-                value_float = float(value)
-                if -48 <= value_float <= 48: #ピッチの範囲
-                    if is_rate:
-                        if 0.125 <= value_float <= 4: #rateの範囲
-                            pitch = round(value_float, 12)
-                            break
-                        else:
-                            print("rateは0.125以上4以下までです\n")
-                    else:
-                        pitch = round(1.059463094359295264561825294946 ** value_float, 12)
-                        break
+        if value == '':
+            print()
+            continue
+
+        # rate指定時
+        if value[0] == "r":
+            is_rate = True
+            value = value[1:]
+
+        # 数字かチェック
+        try:
+            value_float = float(value)
+            if is_rate:
+                if 0.0625 <= value_float <= 16: #rateの範囲
+                    pitch = round(1 / value_float, 8)
+                    break
                 else:
-                    print("ピッチは-48以上48以下までです\n")
-            except ValueError:
-                print("数字を入力してください\n")
+                    print("rateは0.0625以上16以下までです\n")
+            # ピッチで指定したとき
+            else:
+                if -48 <= value_float <= 48: #ピッチの範囲
+                    pitch = round(1.059463094359295264561825294946 ** value_float, 8)
+                    break
+                else:
+                    print("ピッチは-48以上48以下までです\n")  
+        except ValueError:
+            print("数字を入力してください\n")
 
     if is_rate:
-        key_name = "rate" + str(value_float)
+        key_name = "rate" + str(round(value_float, 8))
     else:
         if pitch > 1:
-            key_name = "pitch+" + str(value_float)
+            key_name = "pitch+" + str(round(value_float, 8))
         else:
-            key_name = "pitch" + str(value_float)
+            key_name = "pitch" + str(round(value_float, 8))
 
     # ファイル名重複チェック
     base_name = input_path_obj.stem
@@ -625,101 +723,7 @@ def main():
     # Wav読み込み
     (data_l, data_r), sr = read_wav(input_path_obj)
 
-    if data_r is not None:
-        exist_r = True
-    else:
-        exist_r = False
-
-    baisuuyou = sr
-    baisu_ct = 0
-    while baisuuyou > 0:
-        baisuuyou -= 48000
-        baisu_ct += 1
-
-    shori_sr = 48000 * baisu_ct
-    if sr != shori_sr:
-        data_l, data_r = resampling(data_l, data_r, sr, shori_sr/sr)
-
-    # 端のデータが復元できるように左右の端に0を付け足す
-    padded_data_l, padded_data_r = pad([data_l, data_r], 4096)
-
-    # 分ける帯域の境目
-    fc_himi = 2000
-    fc_lomi = 400
-    numtaps = Settings.numtaps
-    if numtaps % 2 == 0:
-        numtaps += 1
-
-    non_high_data_l, high_data_l = crossover_fir(padded_data_l, shori_sr, fc_himi, numtaps)
-    low_data_l, mid_data_l = crossover_fir(non_high_data_l, shori_sr, fc_lomi, numtaps)
-
-    if exist_r:
-        non_high_data_r, high_data_r = crossover_fir(padded_data_r, shori_sr, fc_himi, numtaps)
-        low_data_r, mid_data_r = crossover_fir(non_high_data_r, shori_sr, fc_lomi, numtaps)
-    else:
-        high_data_r = None
-        mid_data_r = None
-        low_data_r = None
-
-    # 解析に使うfftサイズ
-    # 変えるのはあまりよくない選択
-    fft_size_high = baisu_ct * 1024 * 1
-    fft_size_mid = baisu_ct * 1024 * 2
-    fft_size_low = baisu_ct * 1024 * 4
-
-    new_high_data_l, new_high_data_r = phase_vocoder(high_data_l, high_data_r, pitch, fft_size_high)
-    new_mid_data_l, new_mid_data_r = phase_vocoder(mid_data_l, mid_data_r, pitch, fft_size_mid)
-    new_low_data_l, new_low_data_r = phase_vocoder(low_data_l, low_data_r, pitch, fft_size_low)
-
-    # 帯域ごとに謎のズレがあるのでその補正
-    if pitch > 1:
-        # おそらくこの値が正解？
-        n = math.log10(pitch) / 0.301029995663981195213738894724
-        a = int(round(256 * n * (n + 1) * (n + 2) / 3))
-        zure_high = a
-        # +12のときの補正値
-        zure_mid = 2 * a
-        zure_low = 4 * a
-    elif pitch < 1:
-        # pitch<1の正確な値の計算はわかっていない
-        if 0.5 < pitch:
-            n = -math.log10(pitch) / 0.301029995663981195213738894724
-            a = int(round(-256 * n))
-            zure_high = a
-            zure_mid = 2 * a
-            zure_low = 4 * a
-        else:
-            a = -512
-            zure_high = a
-            zure_mid = 2 * a
-            zure_low = 4 * a
-    else:
-        zure_high = 0
-        zure_mid = 0
-        zure_low = 0
-
-    new_high_data_l, new_high_data_r = pad([new_high_data_l, new_high_data_r], zure_high)
-    new_mid_data_l, new_mid_data_r = pad([new_mid_data_l, new_mid_data_r], zure_mid)
-    new_low_data_l, new_low_data_r = pad([new_low_data_l, new_low_data_r], zure_low)
-
-    # 最も短い波形に合わせるため
-    mostminsize = min(len(new_high_data_l), len(new_mid_data_l), len(new_mid_data_l))
-    new_data_l = new_high_data_l[:mostminsize] + new_mid_data_l[:mostminsize] + new_low_data_l[:mostminsize]
-    if exist_r:
-        new_data_r = new_high_data_r[:mostminsize] + new_mid_data_r[:mostminsize] + new_low_data_r[:mostminsize]
-    else:
-        new_data_r = None
-
-    # 最初のゼロ埋め分の削除
-    new_data_l, new_data_r = pad([new_data_l, new_data_r], -int(4096*pitch))
-
-    # リサンプリング(ピッチシフト用)
-    if Settings.resampling == 1:
-        new_data_l, new_data_r = resampling(new_data_l, new_data_r, shori_sr, 1/pitch)
-
-    # 48kHzに統一していたので元に戻しておく
-    if sr != shori_sr:
-        new_data_l, new_data_r = resampling(new_data_l, new_data_r, shori_sr, sr/shori_sr)
+    new_data_l, new_data_r = phase_vocoder(data_l, data_r, sr, pitch)
 
     # 書き出し
     write_wav(output_path_obj, [new_data_l, new_data_r], sr)
