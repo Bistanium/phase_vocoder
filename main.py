@@ -667,7 +667,7 @@ def main():
     is_rate = False
     # キー指定
     while True:
-        print("To specify a rate, please prefix the number with an 'r'.^nRate (0.0625 ~ 16)")
+        print("To specify a rate, please prefix the number with an 'r'.")
         try:
             value = input('Pitch (-48 ~ 48) : ')
         except EOFError:
